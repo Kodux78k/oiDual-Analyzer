@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>🔍 HTML Analyzer — Universal v2</title>
+
+  <!-- PWA bits -->
+  <meta name="theme-color" content="#06080c" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png" />
+  <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png" />
+
+  <style>
+  :root{
+    --grad-a:#00ffa8;--grad-b:#67e6ff;
+    --bg:#06080c;--panel:#0e1220;--ink:#e8ecf6;--muted:#9ba5bf;--radius:14px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,Segoe UI,Roboto,sans-serif;line-height:1.6}
+  h1{font-size:1.6rem;text-align:center;margin:20px 0;background:linear-gradient(42deg,var(--grad-a),var(--grad-b));-webkit-background-clip:text;color:transparent}
+  .container{max-width:1080px;margin:0 auto;padding:16px}
+  .panel{background:var(--panel);border-radius:var(--radius);padding:16px;margin:10px 0;border:1px solid rgba(255,255,255,.08);box-shadow:0 0 20px rgba(0,0,0,.28)}
+  .controls{display:grid;grid-template-columns:1fr;gap:10px}
+  @media(min-width:760px){ .controls{grid-template-columns:1fr 1fr} }
+  input,textarea,button{border-radius:12px;border:1px solid rgba(255,255,255,.12);padding:10px 12px;background:#090e16;color:var(--ink);width:100%}
+  button{cursor:pointer;background:linear-gradient(42deg,var(--grad-a),var(--grad-b));color:#000;font-weight:800}
+  .toggle-row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+  .toggle-row label{display:flex;align-items:center;gap:6px;font-size:.95rem;color:var(--muted)}
+  table{width:100%;border-collapse:collapse;margin-top:10px}
+  th,td{border:1px solid rgba(255,255,255,.1);padding:6px 10px;text-align:left;font-size:.95rem;vertical-align:top}
+  th{background:rgba(255,255,255,.05)}
+  .grid{display:grid;gap:12px}
+  .grid.cols-2{grid-template-columns:1fr}
+  @media(min-width:980px){ .grid.cols-2{grid-template-columns:1fr 1fr} }
+  pre.code{white-space:pre-wrap;background:#0a0e18;padding:10px;border-radius:12px;border:1px solid rgba(255,255,255,.08);font:500 13px ui-monospace,SFMono-Regular,Consolas,monospace}
+  .row-actions{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0}
+  small.mute{color:var(--muted)}
+  .toast{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);background:rgba(0,0,0,.78);color:#fff;padding:10px 14px;border-radius:10px;z-index:9}
+  .gauge{width:100%;height:160px;border-radius:12px;background:#0a0e18;border:1px solid rgba(255,255,255,.08)}
+  </style>
+</head>
+<body>
+<h1>🔍 HTML Analyzer — Universal v2</h1>
+<div class="container">
+
+  <div class="panel">
+    <div class="controls">
+      <div>
+        <input type="file" id="fileInput" accept=".html,.htm"/>
+      </div>
+      <div>
+        <button id="analyzeBtn">Analisar HTML</button>
+      </div>
+    </div>
+    <textarea id="codeInput" rows="10" placeholder="ou cole o HTML aqui..."></textarea>
+    <div class="toggle-row" style="margin-top:10px">
+      <label><input type="checkbox" id="templateSafe" checked> Template-safe (ignora ${'{...'}}, {{...}} em atributos)</label>
+      <label><input type="checkbox" id="strictMode"> Strict (regex mais rígido para atributos)</label>
+    </div>
+  </div>
+
+  <div class="panel" id="results" style="display:none">
+    <div class="row-actions">
+      <button id="exportMD">Exportar .md</button>
+      <button id="exportJSON">Exportar .json</button>
+      <button id="copyReport">Copiar relatório completo</button>
+    </div>
+
+    <div class="grid cols-2">
+      <div>
+        <h2>📊 Resumo</h2>
+        <canvas id="gauge" class="gauge"></canvas>
+        <table id="summary"></table>
+      </div>
+      <div>
+        <h2>🏷️ Top tags / classes</h2>
+        <table id="topTags"></table>
+        <table id="topClasses"></table>
+      </div>
+    </div>
+
+    <h3>🗺️ Mapa de seções</h3>
+    <table id="sectionMap">
+      <tr><th>Tipo</th><th>Identificação</th><th>Linha início</th><th>Linha fim</th></tr>
+    </table>
+
+    <h3>🔗 Recursos externos</h3>
+    <table id="externals"><tr><th>Tipo</th><th>URL</th></tr></table>
+
+    <h3>🧩 IDs e duplicados</h3>
+    <table id="idsTable"><tr><th>ID</th><th>Qtd</th></tr></table>
+
+    <h3>🧪 A11y quick-scan</h3>
+    <table id="a11y"><tr><th>Regra</th><th>Ocorrências</th></tr></table>
+
+  </div>
+</div>
+
+<div id="toasts" style="position:fixed;inset:auto 0 0 0;display:flex;justify-content:center;pointer-events:none"></div>
+
+<script>
+// ——— utils
+const toast=(m)=>{const t=document.createElement('div');t.className='toast';t.textContent=m;document.body.appendChild(t);setTimeout(()=>t.remove(),1800);};
+const $=id=>document.getElementById(id);
+const escapeHtml=s=>String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+function byteSize(str){ return new Blob([str]).size; }
+function indexToLine(src, idx){ let n=1, pos=0; while((pos=src.indexOf('\n',pos))!==-1 && pos<idx){ n++; pos++; } return n; }
+function endLineForTag(src, startIdx, tagName){ const close=src.indexOf(`</${tagName}`,startIdx); const endIdx=close!==-1? src.indexOf('>',close)+1 : startIdx; return indexToLine(src,endIdx); }
+
+// strip template chunks inside attributes if templateSafe
+function stripTemplateInAttrs(html){
+  // remove `${...}` and `{{...}}` when they sit inside attribute quotes to reduce false positives
+  return html.replace(/="[^"]*?(?:\$\{[^}]*\}|\{\{[^}]*\}\})[^"]*?"/g, m => m.replace(/\$\{[^}]*\}|\{\{[^}]*\}\}/g,''));
+}
+
+function analyzeUniversalHTML(html, {templateSafe=true, strict=false}={}){
+  const src = templateSafe ? stripTemplateInAttrs(String(html)) : String(html);
+  const res={
+    lines: src.split(/\n/).length,
+    bytes: byteSize(src),
+    styles: (src.match(/<style\b/gi)||[]).length,
+    scripts: (src.match(/<script\b/gi)||[]).length,
+    styleInline: 0, styleExternal: 0,
+    scriptInline: 0, scriptExternal: 0,
+    ids: new Map(), dupeIds: [],
+    topTags: [], topClasses: [],
+    sectionMap: [],
+    externals: [],
+    a11y: []
+  };
+
+  // counts by tag
+  const tagRe = /<([a-zA-Z][a-zA-Z0-9-]*)\b/g;
+  const tagCount = {};
+  let m;
+  while((m=tagRe.exec(src))){
+    const t=m[1].toLowerCase(); tagCount[t]=(tagCount[t]||0)+1;
+  }
+
+  // classes
+  const clsRe = /class="([^"]+)"/g; // templateSafe já reduziu placeholders
+  const clsCount = {};
+  while((m=clsRe.exec(src))){
+    m[1].split(/\s+/).forEach(k=>{ if(!k) return; clsCount[k]=(clsCount[k]||0)+1; });
+  }
+
+  // ids (ignora data-id etc.)
+  const idRe = strict
+    ? /(?:^|[\s'";])id="([A-Za-z_][A-Za-z0-9:_\-\.\$]*)"/g
+    : /(?:^|[\s'";])id="([^"]+)"/g;
+  while((m=idRe.exec(src))){
+    const before = src.slice(Math.max(0,idRe.lastIndex-12), idRe.lastIndex);
+    if(/data-id\s*=\s*$/i.test(before)) continue; // evita capturar ...data-id="..."
+    const id = m[1];
+    res.ids.set(id, (res.ids.get(id)||0)+1);
+  }
+  res.dupeIds = [...res.ids].filter(([_,n])=>n>1).map(([k])=>k);
+
+  // script/style inline vs external + section map
+  const styleRe = /<style\b([^>]*)>/gi;
+  while((m=styleRe.exec(src))){
+    const attr = (m[1]||'').trim();
+    const id = (attr.match(/id="([^"]+)"/)||[])[1]||'';
+    const start=m.index;
+    res.styleInline++;
+    res.sectionMap.push({type:'STYLE', ident:id||attr||'-', lineStart:indexToLine(src,start), lineEnd:endLineForTag(src,start,'style')});
+  }
+  const linkRe = /<link\b([^>]*rel="stylesheet"[^>]*)>/gi;
+  while((m=linkRe.exec(src))){
+    const attr=(m[1]||'').trim();
+    const href=(attr.match(/href="([^"]+)"/)||[])[1]||'';
+    res.styleExternal++;
+    res.externals.push({type:'css', url:href});
+    const start=m.index;
+    res.sectionMap.push({type:'LINK', ident:href||attr||'-', lineStart:indexToLine(src,start), lineEnd:indexToLine(src, src.indexOf('>',start)+1)});
+  }
+  const scriptRe = /<script\b([^>]*)>/gi;
+  while((m=scriptRe.exec(src))){
+    const attr=(m[1]||'').trim();
+    const id=(attr.match(/id="([^"]+)"/)||[])[1]||'';
+    const srcAttr=(attr.match(/src="([^"]+)"/)||[])[1]||'';
+    const start=m.index;
+    if(srcAttr){ res.scriptExternal++; res.externals.push({type:'js', url:srcAttr}); }
+    else res.scriptInline++;
+    res.sectionMap.push({type:'SCRIPT', ident:id||srcAttr||attr||'-', lineStart:indexToLine(src,start), lineEnd:endLineForTag(src,start,'script')});
+  }
+
+  // head/body map
+  const headOpen = src.search(/<head\b/i);
+  if(headOpen!==-1) res.sectionMap.push({type:'HEAD', ident:'-', lineStart:indexToLine(src,headOpen), lineEnd:endLineForTag(src,headOpen,'head')});
+  const bodyOpen = src.search(/<body\b/i);
+  if(bodyOpen!==-1) res.sectionMap.push({type:'BODY', ident:'-', lineStart:indexToLine(src,bodyOpen), lineEnd:endLineForTag(src,bodyOpen,'body')});
+
+  // externals: images, iframes, media sources
+  const imgRe=/<img\b([^>]*)>/gi;
+  while((m=imgRe.exec(src))){
+    const attr=(m[1]||''); const url=(attr.match(/src="([^"]+)"/)||[])[1];
+    if(url) res.externals.push({type:'img', url});
+  }
+  const ifrRe=/<iframe\b([^>]*)>/gi;
+  while((m=ifrRe.exec(src))){
+    const attr=(m[1]||''); const url=(attr.match(/src="([^"]+)"/)||[])[1];
+    if(url) res.externals.push({type:'iframe', url});
+  }
+  const srcRe=/<(?:source|video|audio)\b([^>]*)>/gi;
+  while((m=srcRe.exec(src))){
+    const attr=(m[1]||''); const url=(attr.match(/src="([^"]+)"/)||[])[1];
+    if(url) res.externals.push({type:'media', url});
+  }
+
+  // top lists
+  res.topTags = Object.entries(tagCount).sort((a,b)=>b[1]-a[1]).slice(0,25).map(([name,count])=>({name,count}));
+  res.topClasses = Object.entries(clsCount).sort((a,b)=>b[1]-a[1]).slice(0,25).map(([name,count])=>({name,count}));
+
+  // A11y quick scan (heurístico)
+  const noAlt = (src.match(/<img\b(?![^>]*\balt=)[^>]*>/gi)||[]).length;
+  const btnNoType = (src.match(/<button\b(?![^>]*\btype=)[^>]*>/gi)||[]).length;
+  const aNoHref = (src.match(/<a\b(?![^>]*\bhref=)[^>]*>/gi)||[]).length;
+  res.a11y = [
+    {rule:'img sem alt', count:noAlt},
+    {rule:'button sem type', count:btnNoType},
+    {rule:'a sem href', count:aNoHref}
+  ];
+
+  // score simples p/ gauge (só pra dar noção)
+  res.score = Math.min(100, res.scripts*2.5 + res.styles*2 + res.topTags.length + (res.dupeIds.length? 0 : 10) + Math.min(20, res.externals.length*0.8));
+  return res;
+}
+
+// ——— render
+function render(res){
+  // summary
+  $('summary').innerHTML = `
+    <tr><th>Linhas</th><td>${res.lines}</td></tr>
+    <tr><th>Tamanho (KB)</th><td>${(res.bytes/1024).toFixed(1)}</td></tr>
+    <tr><th>&lt;style&gt; (inline/externo)</th><td>${res.styles} (${res.styleInline}/${res.styleExternal})</td></tr>
+    <tr><th>&lt;script&gt; (inline/externo)</th><td>${res.scripts} (${res.scriptInline}/${res.scriptExternal})</td></tr>
+    <tr><th>Top tags</th><td>${res.topTags.map(t=>`${t.name} (${t.count})`).slice(0,5).join(', ')||'—'}</td></tr>
+    <tr><th>IDs duplicados</th><td>${res.dupeIds.length? res.dupeIds.join(', ') : 'nenhum'}</td></tr>
+  `;
+
+  // top tags/classes
+  $('topTags').innerHTML = res.topTags.length
+    ? '<tr><th>Tag</th><th>Ocorrências</th></tr>' + res.topTags.map(r=>`<tr><td>${r.name}</td><td>${r.count}</td></tr>`).join('')
+    : '<tr><td>Nenhuma tag</td></tr>';
+
+  $('topClasses').innerHTML = res.topClasses.length
+    ? '<tr><th>Classe</th><th>Ocorrências</th></tr>' + res.topClasses.map(r=>`<tr><td>${r.name}</td><td>${r.count}</td></tr>`).join('')
+    : '<tr><td>Nenhuma classe</td></tr>';
+
+  // sections
+  $('sectionMap').innerHTML = '<tr><th>Tipo</th><th>Identificação</th><th>Linha início</th><th>Linha fim</th></tr>' +
+    res.sectionMap.sort((a,b)=>a.lineStart-b.lineStart)
+      .map(s=>`<tr><td>${s.type}</td><td>${escapeHtml(String(s.ident)).slice(0,160)||'-'}</td><td>${s.lineStart}</td><td>${s.lineEnd}</td></tr>`)
+      .join('');
+
+  // externals
+  $('externals').innerHTML = '<tr><th>Tipo</th><th>URL</th></tr>' +
+    (res.externals.length? res.externals.map(e=>`<tr><td>${e.type}</td><td>${escapeHtml(e.url)}</td></tr>`).join('') : '<tr><td colspan="2">—</td></tr>');
+
+  // ids
+  $('idsTable').innerHTML = '<tr><th>ID</th><th>Qtd</th></tr>' +
+    ([...res.ids.entries()].sort((a,b)=>b[1]-a[1]).map(([k,v])=>`<tr><td>${escapeHtml(k)}</td><td>${v}</td></tr>`).join('') || '<tr><td colspan="2">—</td></tr>');
+
+  // a11y
+  $('a11y').innerHTML = '<tr><th>Regra</th><th>Ocorrências</th></tr>' +
+    res.a11y.map(r=>`<tr><td>${r.rule}</td><td>${r.count}</td></tr>`).join('');
+
+  // gauge
+  const ctx=$('gauge').getContext('2d');
+  const W=ctx.canvas.width=ctx.canvas.clientWidth;
+  const H=ctx.canvas.height=ctx.canvas.clientHeight;
+  const max=100, val=Math.max(0,Math.min(max,res.score||0));
+  const cx=W/2, cy=H-12, r=Math.min(W,H*2)/3;
+  ctx.clearRect(0,0,W,H);
+  ctx.lineWidth=18;
+  ctx.strokeStyle='rgba(255,255,255,.12)';
+  ctx.beginPath(); ctx.arc(cx,cy,r,Math.PI,0); ctx.stroke();
+  const grad=ctx.createLinearGradient(0,0,W,0);
+  grad.addColorStop(0,'#00ffa8'); grad.addColorStop(1,'#67e6ff');
+  ctx.strokeStyle=grad; ctx.beginPath(); ctx.arc(cx,cy,r,Math.PI,Math.PI+Math.PI*(val/max),false); ctx.stroke();
+  ctx.fillStyle='#e8ecf6'; ctx.font='bold 20px system-ui'; ctx.textAlign='center'; ctx.fillText(`${val.toFixed(1)} / ${max}`,cx,cy-4);
+
+  $('results').style.display='block';
+}
+
+// exports
+function buildMarkdown(res){
+  const tt = res.topTags.map(r=>`| ${r.name} | ${r.count} |`).join('\n')||'| — | — |';
+  const tc = res.topClasses.map(r=>`| ${r.name} | ${r.count} |`).join('\n')||'| — | — |';
+  const sm = res.sectionMap.sort((a,b)=>a.lineStart-b.lineStart)
+              .map(s=>`| ${s.type} | ${String(s.ident).replace(/\|/g,'\\|')} | ${s.lineStart} | ${s.lineEnd} |`).join('\n')||'| — | — | — | — |';
+  const ex = res.externals.map(e=>`| ${e.type} | ${e.url} |`).join('\n')||'| — | — |';
+  const ids = [...res.ids.entries()].map(([k,v])=>`| ${k} | ${v} |`).join('\n')||'| — | — |';
+  const a11y = res.a11y.map(a=>`| ${a.rule} | ${a.count} |`).join('\n')||'| — | — |';
+  return `# HTML Analyzer — Universal v2
+
+- Linhas: ${res.lines}
+- Tamanho: ${(res.bytes/1024).toFixed(1)} KB
+- Styles: ${res.styles} (inline: ${res.styleInline}, externo: ${res.styleExternal})
+- Scripts: ${res.scripts} (inline: ${res.scriptInline}, externo: ${res.scriptExternal})
+- IDs duplicados: ${res.dupeIds.length? res.dupeIds.join(', ') : 'nenhum'}
+
+## Top Tags (25)
+| Tag | Ocorrências |
+|---|---|
+${tt}
+
+## Top Classes (25)
+| Classe | Ocorrências |
+|---|---|
+${tc}
+
+## Mapa de Seções
+| Tipo | Identificação | Linha início | Linha fim |
+|---|---|---:|---:|
+${sm}
+
+## Recursos Externos
+| Tipo | URL |
+|---|---|
+${ex}
+
+## IDs
+| ID | Qtd |
+|---|---|
+${ids}
+
+## A11y Quick-scan
+| Regra | Ocorrências |
+|---|---|
+${a11y}
+`;
+}
+function exportFile(res,type){
+  const data=(type==='md')?buildMarkdown(res):JSON.stringify(res,null,2);
+  const blob=new Blob([data],{type:type==='md'?'text/markdown':'application/json'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+  a.download='html_analysis.'+(type==='md'?'md':'json');a.click();URL.revokeObjectURL(a.href);
+}
+async function copyFull(res){
+  try{ await navigator.clipboard.writeText(buildMarkdown(res)); toast('Relatório copiado'); }
+  catch{ toast('Falha ao copiar'); }
+}
+
+// hooks
+$('analyzeBtn').onclick=()=>{
+  const file=$('fileInput').files[0];
+  const opts={ templateSafe: $('templateSafe').checked, strict: $('strictMode').checked };
+  if(file){ file.text().then(html=>{ window.__res=analyzeUniversalHTML(html,opts); render(__res); }); return; }
+  const txt=$('codeInput').value.trim();
+  if(txt){ window.__res=analyzeUniversalHTML(txt,opts); render(__res); return; }
+  toast('Envie um arquivo ou cole o HTML primeiro');
+};
+$('exportMD').onclick=()=> window.__res && exportFile(__res,'md');
+$('exportJSON').onclick=()=> window.__res && exportFile(__res,'json');
+$('copyReport').onclick=()=> window.__res && copyFull(__res);
+</script>
+
+<style id="PATCH_TOGGLE_FIX_V3">
+  /* Área dos toggles: grid-responsivo, sem overflow lateral */
+  .toggle-row{
+    display:flex; flex-wrap:wrap; gap:10px;
+    align-items:stretch;
+  }
+  /* Cada label vira um "chip" responsivo */
+  .toggle-row label{
+    display:flex; align-items:center; gap:10px;
+    flex:1 1 260px; min-height:44px;
+    padding:8px 12px; border-radius:12px;
+    background:#0a0e18; color:var(--ink);
+    border:1px solid rgba(255,255,255,.14);
+  }
+  /* Texto longo dentro do chip (quebra elegante) */
+  .toggle-row .tog-txt{
+    flex:1 1 auto; line-height:1.35;
+    word-break:break-word; overflow-wrap:anywhere;
+    display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:3; overflow:hidden;
+  }
+
+  /* Switch custom (substitui checkbox nativo) */
+  .toggle-row input[type="checkbox"]{
+    appearance:none; -webkit-appearance:none; outline:none;
+    width:38px; height:22px; border-radius:999px;
+    background:rgba(255,255,255,.14);
+    border:1px solid rgba(255,255,255,.22);
+    position:relative; cursor:pointer; flex:0 0 auto;
+  }
+  .toggle-row input[type="checkbox"]::after{
+    content:""; position:absolute; top:2px; left:2px;
+    width:18px; height:18px; border-radius:50%;
+    background:#fff; box-shadow:0 1px 2px rgba(0,0,0,.35);
+    transition:left .18s ease, background .18s ease;
+  }
+  .toggle-row input[type="checkbox"]:checked{
+    background:linear-gradient(42deg,var(--grad-a),var(--grad-b));
+    border-color:transparent;
+  }
+  .toggle-row input[type="checkbox"]:checked::after{ left:calc(100% - 20px); }
+
+  /* Acessibilidade/foco */
+  .toggle-row label:has(input[type="checkbox"]:focus-visible){
+    box-shadow:0 0 0 2px color-mix(in oklab, var(--grad-b), transparent 70%);
+  }
+</style>
+
+
+<script id="PATCH_TOGGLE_TEXT_WRAP">
+(()=>{ 'use strict';
+  document.querySelectorAll('.toggle-row label').forEach(lb=>{
+    if(lb.querySelector('.tog-txt')) return;
+    // Junta todos os nós de texto do label dentro de um span .tog-txt
+    const txtNodes=[...lb.childNodes].filter(n=>n.nodeType===3 && String(n.nodeValue).trim().length);
+    if(!txtNodes.length) return;
+    const span=document.createElement('span'); span.className='tog-txt';
+    txtNodes.forEach(n=> span.appendChild(n)); // move o texto pro span
+    lb.appendChild(span);
+  });
+})();
+</script>
+
+<style id="PATCH_TABLE_REFINEMENT_V2">
+  /* Tabelas responsivas com mobile-lock */
+  table{
+    width:100%;
+    border-collapse:collapse;
+    margin:10px 0;
+    table-layout:fixed; /* impede expansão lateral */
+    border-radius:12px;
+    overflow:hidden;
+  }
+  th,td{
+    border:1px solid rgba(255,255,255,.1);
+    padding:8px 10px;
+    text-align:left;
+    vertical-align:top;
+    font-size:.95rem;
+    word-break:break-word;
+    overflow-wrap:anywhere;
+    hyphens:auto;
+  }
+  th{
+    background:rgba(255,255,255,.05);
+    font-weight:700;
+  }
+
+  /* alternância de cores p/ legibilidade */
+  tr:nth-child(even)>td{
+    background:rgba(255,255,255,.02);
+  }
+
+  /* cabeçalhos fixos não (para mobile, scroll natural) */
+  table::-webkit-scrollbar{
+    height:8px;
+  }
+
+  /* Clamp opcional p/ células muito grandes */
+  td.clamp-2,th.clamp-2{
+    display:-webkit-box;
+    -webkit-box-orient:vertical;
+    -webkit-line-clamp:2;
+    overflow:hidden;
+  }
+  td.clamp-3,th.clamp-3{
+    display:-webkit-box;
+    -webkit-box-orient:vertical;
+    -webkit-line-clamp:3;
+    overflow:hidden;
+  }
+
+  /* Recuo visual */
+  table caption{
+    caption-side:top;
+    color:var(--muted);
+    text-align:left;
+    font-size:.85rem;
+    padding:4px 0;
+  }
+
+  /* Safe no mobile */
+  @media(max-width:640px){
+    th,td{font-size:.9rem;padding:6px 8px}
+    table{border-radius:10px}
+  }
+</style>
+
+<script>
+(()=>{'use strict';
+/* =========================
+   LITE COMBO — HUB + ANALYZER
+   Mobile-lock • clamps • persist
+   ========================= */
+
+const CSS=`
+#kuxLite{position:fixed;top:0;right:0;bottom:0;width:min(92vw,440px);max-width:440px;z-index:999999;
+  background:#0e1220;color:#e8ecf6;border-left:1px solid rgba(255,255,255,.12);
+  box-shadow:-14px 0 40px rgba(0,0,0,.45);display:flex;flex-direction:column;font:400 14px system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+#kuxLiteHdr{display:flex;gap:8px;align-items:center;padding:10px 12px;background:linear-gradient(42deg,#00ffa8,#67e6ff);color:#001}
+#kuxLiteHdr b{flex:1}
+#kuxLiteHdr button{background:#0a0e18;border:1px solid rgba(0,0,0,.25);color:#e8ecf6;border-radius:10px;padding:6px 10px;cursor:pointer}
+#kuxTabs{display:flex;gap:8px;padding:8px 12px;border-bottom:1px solid rgba(255,255,255,.12);background:#0f1220}
+#kuxTabs button{flex:1 1 120px;background:#0a0e18;color:#e8ecf6;border:1px solid rgba(255,255,255,.14);border-radius:10px;padding:8px;cursor:pointer}
+#kuxTabs button.active{background:linear-gradient(42deg,#00ffa8,#67e6ff);color:#001;border-color:transparent}
+#kuxBody{flex:1;overflow:auto;padding:10px 12px}
+.kuxRow{display:flex;gap:10px;flex-wrap:wrap;margin:8px 0}
+.kuxRow .chip{display:flex;align-items:center;gap:10px;flex:1 1 260px;min-height:44px;padding:8px 12px;border-radius:12px;background:#0a0e18;border:1px solid rgba(255,255,255,.14)}
+.kuxRow .tog{appearance:none;-webkit-appearance:none;outline:none;width:38px;height:22px;border-radius:999px;background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.22);position:relative;cursor:pointer;flex:0 0 auto}
+.kuxRow .tog:after{content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.35);transition:left .18s ease}
+.kuxRow .tog:checked{background:linear-gradient(42deg,#00ffa8,#67e6ff);border-color:transparent}
+.kuxRow .tog:checked:after{left:calc(100% - 20px)}
+.kuxRow textarea{width:100%;min-height:96px;background:#0a0e18;color:#e8ecf6;border:1px solid rgba(255,255,255,.14);border-radius:10px;padding:8px}
+.kuxBtn{background:#0a0e18;color:#e8ecf6;border:1px solid rgba(255,255,255,.18);border-radius:10px;padding:8px 10px;cursor:pointer}
+.kuxBtn.pri{background:linear-gradient(42deg,#00ffa8,#67e6ff);color:#001;border-color:transparent}
+.kuxGauge{width:100%;height:140px;border-radius:10px;background:#0a0e18;border:1px solid rgba(255,255,255,.08);margin:6px 0 10px}
+.kuxToast{position:fixed;left:50%;bottom:12px;transform:translateX(-50%);background:rgba(0,0,0,.82);color:#fff;padding:8px 12px;border-radius:8px;z-index:1000000;display:none}
+.kuxTbl{width:100%;border-collapse:collapse;margin:10px 0;table-layout:fixed;border-radius:12px;overflow:hidden}
+.kuxTbl th,.kuxTbl td{border:1px solid rgba(255,255,255,.1);padding:8px 10px;text-align:left;vertical-align:top;font-size:.95rem;word-break:break-word;overflow-wrap:anywhere;hyphens:auto}
+.kuxTbl th{background:rgba(255,255,255,.06)}
+.kuxTbl tr:nth-child(even)>td{background:rgba(255,255,255,.02)}
+.kuxClamp2{-webkit-line-clamp:2}.kuxClamp3{-webkit-line-clamp:3}
+.kuxClamp2,.kuxClamp3{display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden}
+.kuxInput{width:100%;min-height:44px;background:#0a0e18;color:#e8ecf6;border:1px solid rgba(255,255,255,.14);border-radius:10px;padding:8px}
+
+/* Botão flutuante para reabrir o menu */
+#kuxLauncher{
+  position:fixed;
+  bottom:16px;
+  right:16px;
+  z-index:999998;
+  width:54px;
+  height:54px;
+  border-radius:999px;
+  background:linear-gradient(42deg,#00ffa8,#67e6ff);
+  border:none;
+  color:#001;
+  font-weight:700;
+  display:none;
+  align-items:center;
+  justify-content:center;
+  box-shadow:0 0 0 1px rgba(0,0,0,.4),0 12px 30px rgba(0,0,0,.6);
+  cursor:pointer;
+}
+#kuxLauncher span{
+  font-size:11px;
+  line-height:1.1;
+  letter-spacing:.02em;
+}
+`;
+
+const NS='kux:combo:';
+const $=(sel,root=document)=>root.querySelector(sel);
+const $$=(sel,root=document)=>[...root.querySelectorAll(sel)];
+const save=(k,v)=>localStorage.setItem(NS+k,JSON.stringify(v));
+const load=(k,d)=>{try{return JSON.parse(localStorage.getItem(NS+k)||JSON.stringify(d))}catch{return d}};
+
+function toast(msg){
+  let t=$('#kuxToast'); if(!t){ t=document.createElement('div'); t.id='kuxToast'; t.className='kuxToast'; document.body.appendChild(t); }
+  t.textContent=msg; t.style.display='block'; setTimeout(()=>t.style.display='none',1400);
+}
+
+function bytes(s){ return new Blob([s]).size; }
+function drawGauge(canvas,val){
+  const ctx=canvas.getContext('2d'); const W=canvas.width=canvas.clientWidth; const H=canvas.height=canvas.clientHeight;
+  const max=100; val=Math.max(0,Math.min(max,val||0)); const cx=W/2, cy=H-10, r=Math.min(W,H*2)/3;
+  ctx.clearRect(0,0,W,H); ctx.lineWidth=16; ctx.strokeStyle='rgba(255,255,255,.12)';
+  ctx.beginPath(); ctx.arc(cx,cy,r,Math.PI,0); ctx.stroke();
+  const g=ctx.createLinearGradient(0,0,W,0); g.addColorStop(0,'#00ffa8'); g.addColorStop(1,'#67e6ff');
+  ctx.strokeStyle=g; ctx.beginPath(); ctx.arc(cx,cy,r,Math.PI,Math.PI+Math.PI*(val/max),false); ctx.stroke();
+  ctx.fillStyle='#e8ecf6'; ctx.font='bold 16px system-ui'; ctx.textAlign='center'; ctx.fillText(`${val.toFixed(1)} / ${max}`,cx,cy-2);
+}
+
+function mdReport(sum,tTags,tCls,ids){
+  const tt=tTags.map(r=>`| ${r[0]} | ${r[1]} |`).join('\n')||'| — | — |';
+  const tc=tCls.map(r=>`| ${r[0]} | ${r[1]} |`).join('\n')||'| — | — |';
+  const li=[...ids.entries()].map(([k,v])=>`| ${k} | ${v} |`).join('\n')||'| — | — |';
+  return `# HTML Lite Analysis
+
+- Linhas: ${sum.lines}
+- Tamanho: ${(sum.kb).toFixed(1)} KB
+- Tags únicas: ${sum.tagsU}
+- Classes únicas: ${sum.classesU}
+- IDs duplicados: ${sum.dupes.length? sum.dupes.join(', ') : 'nenhum'}
+- Score: ${sum.score.toFixed(1)} / 100
+
+## Top Tags
+| Tag | Ocorrências |
+|---|---|
+${tt}
+
+## Top Classes
+| Classe | Ocorrências |
+|---|---|
+${tc}
+
+## IDs
+| ID | Qtd |
+|---|---|
+${li}
+`;
+}
+
+/* ========== PANEL ========= */
+if($('#kuxLite')) { $('#kuxLite').remove(); }
+const style=document.createElement('style'); style.textContent=CSS; document.head.appendChild(style);
+
+const wrap=document.createElement('div'); wrap.id='kuxLite';
+wrap.innerHTML=`
+  <div id="kuxLiteHdr">
+    <b>Lite Combo — Hub & Analyzer</b>
+    <button id="kuxClose">Fechar</button>
+  </div>
+  <div id="kuxTabs">
+    <button data-tab="comp" class="active">Componentes</button>
+    <button data-tab="ana">Analisar</button>
+  </div>
+  <div id="kuxBody">
+    <div data-panel="comp">
+      <div class="kuxRow"><b>Componentes com <code>data-comp="..."</code></b></div>
+      <div id="kuxComps"></div>
+      <div class="kuxRow"><b>CSS Rápido</b><small>(id: kux-lite-css)</small></div>
+      <textarea id="kuxCSS" class="kuxInput" placeholder="/* cole CSS a injetar (persiste) */"></textarea>
+      <div class="kuxRow">
+        <button id="kuxApplyCSS" class="kuxBtn pri">Aplicar CSS</button>
+        <button id="kuxClearCSS" class="kuxBtn">Limpar CSS</button>
+      </div>
+      <div class="kuxRow"><b>JS Rápido</b><small>(id: kux-lite-js)</small></div>
+      <textarea id="kuxJS" class="kuxInput" placeholder="// cole JS para injetar (persiste)"></textarea>
+      <div class="kuxRow">
+        <button id="kuxApplyJS" class="kuxBtn pri">Aplicar JS</button>
+        <button id="kuxClearJS" class="kuxBtn">Limpar JS</button>
+      </div>
+    </div>
+
+    <div data-panel="ana" style="display:none">
+      <div class="kuxRow">
+        <button id="kuxScanPage" class="kuxBtn pri">Analisar esta página</button>
+        <button id="kuxCopyMD" class="kuxBtn">Copiar .md</button>
+        <button id="kuxSaveJSON" class="kuxBtn">Baixar .json</button>
+      </div>
+      <textarea id="kuxPaste" class="kuxInput" placeholder="(opcional) cole HTML aqui para analisar"></textarea>
+      <canvas id="kuxG" class="kuxGauge"></canvas>
+      <table class="kuxTbl" id="kuxSumTbl"></table>
+      <h4>Top tags</h4><table class="kuxTbl" id="kuxTagsTbl"></table>
+      <h4>Top classes</h4><table class="kuxTbl" id="kuxClsTbl"></table>
+      <h4>IDs e duplicados</h4><table class="kuxTbl" id="kuxIDsTbl"></table>
+    </div>
+  </div>
+`;
+document.body.appendChild(wrap);
+
+/* Botão flutuante para reabrir o painel */
+const launcher=document.createElement('button');
+launcher.id='kuxLauncher';
+launcher.innerHTML='<span>Oi<br>Dual</span>';
+document.body.appendChild(launcher);
+
+const toastEl=document.createElement('div'); toastEl.id='kuxToast'; toastEl.className='kuxToast'; document.body.appendChild(toastEl);
+
+/* Tabs */
+$('#kuxTabs').addEventListener('click',e=>{
+  const b=e.target.closest('button[data-tab]'); if(!b) return;
+  $$('#kuxTabs button').forEach(x=>x.classList.remove('active')); b.classList.add('active');
+  const tab=b.dataset.tab;
+  $$('#kuxBody [data-panel]').forEach(p=> p.style.display = (p.getAttribute('data-panel')===tab?'block':'none'));
+});
+
+/* Close: agora só esconde e mostra o launcher */
+$('#kuxClose').onclick=()=>{ 
+  wrap.style.display='none'; 
+  launcher.style.display='flex'; 
+};
+
+/* Reabrir painel pelo botão flutuante */
+launcher.onclick=()=>{ 
+  wrap.style.display='flex';
+  launcher.style.display='none';
+};
+
+/* ======= Component Hub ======= */
+function listComps(){
+  const set=new Set(); $$('[data-comp]').forEach(el=> set.add(el.getAttribute('data-comp'))); return [...set].sort();
+}
+function setComp(name,on){ $$(`[data-comp="${name}"]`).forEach(el=> el.style.display = on? '' : 'none'); save('toggle:'+name,!!on); }
+function getComp(name){ return !!load('toggle:'+name,false); }
+function injectStyle(id,css){ let s=document.getElementById(id); if(!s){ s=document.createElement('style'); s.id=id; document.head.appendChild(s); } s.textContent=css||''; save('style:'+id,css||''); }
+function injectScript(id,js){ let s=document.getElementById(id); if(s) s.remove(); if(js && js.trim()){ s=document.createElement('script'); s.id=id; s.textContent=js; document.body.appendChild(s); } save('script:'+id,js||''); }
+
+function bootPersist(){
+  Object.keys(localStorage).forEach(k=>{
+    if(!k.startsWith(NS)) return;
+    const key=k.slice(NS.length);
+    if(key.startsWith('style:')) injectStyle(key.slice(6), load(key,''));
+    if(key.startsWith('script:')) injectScript(key.slice(7), load(key,''));
+    if(key.startsWith('toggle:')) setComp(key.slice(7), load(key,false));
+  });
+}
+function renderComps(){
+  const host=$('#kuxComps'); const comps=listComps();
+  host.innerHTML = comps.length ? comps.map(name=>{
+    const on=getComp(name);
+    return `<label class="chip"><input type="checkbox" class="tog" data-c="${name}" ${on?'checked':''}/><span>${name}</span></label>`;
+  }).join('') : `<small>Sem elementos com <code>data-comp</code> nesta página.</small>`;
+}
+$('#kuxComps').addEventListener('change',e=>{
+  const c=e.target.closest('input.tog[data-c]'); if(!c) return;
+  setComp(c.getAttribute('data-c'), c.checked);
+});
+$('#kuxApplyCSS').onclick=()=>{ injectStyle('kux-lite-css', $('#kuxCSS').value||''); toast('CSS aplicado'); };
+$('#kuxClearCSS').onclick=()=>{ injectStyle('kux-lite-css',''); toast('CSS limpo'); };
+$('#kuxApplyJS').onclick=()=>{ injectScript('kux-lite-js', $('#kuxJS').value||''); toast('JS aplicado'); };
+$('#kuxClearJS').onclick=()=>{ injectScript('kux-lite-js',''); toast('JS limpo'); };
+
+bootPersist(); renderComps();
+$('#kuxCSS').value = load('style:kux-lite-css','');
+$('#kuxJS').value  = load('script:kux-lite-js','');
+
+/* ======= Analyzer ======= */
+function analyze(html){
+  const src=String(html||''); const lines=(src.match(/\n/g)||[]).length+1;
+  const kb=bytes(src)/1024;
+  const tagC={}, tagRe=/<([a-zA-Z][a-zA-Z0-9-]*)\b/g; let m;
+  while((m=tagRe.exec(src))){ const t=m[1].toLowerCase(); tagC[t]=(tagC[t]||0)+1; }
+  const clsC={}, clsRe=/class="([^"]+)"/g; let c;
+  while((c=clsRe.exec(src))){ c[1].split(/\s+/).forEach(k=>{ if(!k) return; clsC[k]=(clsC[k]||0)+1; }); }
+  const ids=new Map(), idRe=/(^|[\s'";])id="([^"]+)"/g;
+  while((m=idRe.exec(src))){ const id=m[2]; ids.set(id,(ids.get(id)||0)+1); }
+  const dupe=[...ids.entries()].filter(([_,n])=>n>1).map(([k])=>k);
+  const tTags=[...Object.entries(tagC)].sort((a,b)=>b[1]-a[1]).slice(0,25);
+  const tCls=[...Object.entries(clsC)].sort((a,b)=>b[1]-a[1]).slice(0,25);
+  const score=Math.min(100, Object.keys(tagC).length + tCls.length + (dupe.length?0:10));
+  return {summary:{lines,kb,tagsU:Object.keys(tagC).length,classesU:Object.keys(clsC).length,dupes:dupe,score}, tTags, tCls, ids};
+}
+
+function renderAna(res){
+  const s=res.summary;
+  $('#kuxSumTbl').innerHTML = `
+    <tr><th>Linhas</th><td>${s.lines}</td></tr>
+    <tr><th>Tamanho (KB)</th><td>${s.kb.toFixed(1)}</td></tr>
+    <tr><th>Tags únicas</th><td>${s.tagsU}</td></tr>
+    <tr><th>Classes únicas</th><td>${s.classesU}</td></tr>
+    <tr><th>IDs duplicados</th><td>${s.dupes.length? s.dupes.join(', ') : 'nenhum'}</td></tr>`;
+  const T=(el,data,head1,head2)=>{ el.innerHTML = data.length
+    ? `<tr><th>${head1}</th><th>${head2}</th></tr>` + data.map(r=>`<tr><td class="kuxClamp2">${r[0]}</td><td>${r[1]}</td></tr>`).join('')
+    : '<tr><td>Nenhum</td></tr>'; };
+  T($('#kuxTagsTbl'), res.tTags, 'Tag', 'Ocorrências');
+  T($('#kuxClsTbl'),  res.tCls,  'Classe', 'Ocorrências');
+  $('#kuxIDsTbl').innerHTML = '<tr><th>ID</th><th>Qtd</th></tr>' + ([...res.ids.entries()].sort((a,b)=>b[1]-a[1]).map(([k,v])=>`<tr><td class="kuxClamp2">${k}</td><td>${v}</td></tr>`).join('')||'<tr><td colspan="2">—</td></tr>');
+  drawGauge($('#kuxG'), s.score);
+}
+
+function getPageHTML(){
+  try{ return document.documentElement.outerHTML; }
+  catch{ try{ return new XMLSerializer().serializeToString(document); } catch{ return '<!doctype html>' + document.documentElement.innerHTML; } }
+}
+
+$('#kuxScanPage').onclick=()=>{
+  const pasted=$('#kuxPaste').value.trim();
+  const html=pasted||getPageHTML();
+  const res=analyze(html); window.__kuxAna=res; renderAna(res); toast('Analisado');
+};
+$('#kuxCopyMD').onclick=async()=>{
+  if(!window.__kuxAna){ toast('Analise primeiro'); return; }
+  const {summary:t,tTags:tT,tCls:tC,ids}=window.__kuxAna;
+  const md = mdReport(t, tT, tC, ids);
+  try{ await navigator.clipboard.writeText(md); toast('Relatório copiado'); }catch{ toast('Falha ao copiar'); }
+};
+$('#kuxSaveJSON').onclick=()=>{
+  if(!window.__kuxAna){ toast('Analise primeiro'); return; }
+  const blob=new Blob([JSON.stringify(window.__kuxAna,null,2)],{type:'application/json'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='lite_analysis.json'; a.click(); URL.revokeObjectURL(a.href);
+};
+
+/* auto-open Analyzer once on first load? keep manual */
+})();
+</script>
+
+<!-- PWA: registro do Service Worker -->
+<script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', function () {
+    navigator.serviceWorker.register('./sw.js')
+      .catch(function (err) {
+        console.log('SW registration failed:', err);
+      });
+  });
+}
+</script>
+
+</body>
+</html>
